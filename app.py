@@ -529,10 +529,10 @@ setInterval(refresh, 6000); // actualizar UI cada 6 segundos
 # ──────────────────────────────────────────
 #  ARRANQUE
 # ──────────────────────────────────────────
-if __name__ == "__main__":
-    # Lanzar threads de fondo
-    threading.Thread(target=api_loop,    daemon=True).start()
-    threading.Thread(target=jitter_loop, daemon=True).start()
+# Iniciar threads de fondo al importar (gunicorn no ejecuta __main__)
+threading.Thread(target=api_loop,    daemon=True).start()
+threading.Thread(target=jitter_loop, daemon=True).start()
 
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
