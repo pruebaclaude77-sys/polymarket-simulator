@@ -1,18 +1,18 @@
 """
-Polymarket Barbell Simulator — Servidor 24/7
-Versión: 2.0 — Estrategia mejorada con aprendizaje adaptativo
+Polymarket Barbell Simulator â Servidor 24/7
+VersiÃ³n: 2.0 â Estrategia mejorada con aprendizaje adaptativo
 Despliega en Railway (railway.app) gratis
 
 Mejoras v2:
-  - EV real calculado desde precio de entrada vs TP dinámico
-  - TP dinámico: entrada + 15pp (más realista)
-  - SL ajustado: 7% (más rápido en cortar pérdidas)
+  - EV real calculado desde precio de entrada vs TP dinÃ¡mico
+  - TP dinÃ¡mico: entrada + 15pp (mÃ¡s realista)
+  - SL ajustado: 7% (mÃ¡s rÃ¡pido en cortar pÃ©rdidas)
   - Filtro de momentum: no entra en mercados con precio cayendo
-  - Anti-correlación: evita posiciones sobre el mismo evento
-  - Aprendizaje por categoría: ajusta Kelly según win rate histórico
-  - Kelly dinámico: reduce posición tras pérdidas consecutivas
+  - Anti-correlaciÃ³n: evita posiciones sobre el mismo evento
+  - Aprendizaje por categorÃ­a: ajusta Kelly segÃºn win rate histÃ³rico
+  - Kelly dinÃ¡mico: reduce posiciÃ³n tras pÃ©rdidas consecutivas
   - Salida temporal: cierra posiciones estancadas tras N ciclos
-  - Filtro de spread: evita mercados ilíquidos con spread alto
+  - Filtro de spread: evita mercados ilÃ­quidos con spread alto
 """
 import os
 import time
@@ -26,53 +26,55 @@ from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
 
-# ──────────────────────────────────────────
-# CONFIGURACIÓN v2
-# ──────────────────────────────────────────
-API_URL      = "https://gamma-api.polymarket.com/markets?limit=100&active=true&closed=false&order=volume24hr&ascending=false"
-INTERVAL     = 30   # segundos entre ciclos API
+# ââââââââââââââââââââââââââââââââââââââââââ
+# CONFIGURACIÃN v2
+# ââââââââââââââââââââââââââââââââââââââââââ
+API_URL      = "https://gamma-api.polymarket.com/markets?limit=300&active=true&closed=false&order=volume24hr&ascending=false"
+INTERVAL     = 25   # segundos entre ciclos API
 JIT_INTERVAL = 6    # micro-actualizaciones de precio
 
 CORE = dict(
     label="CORE",
-    min_prob=0.55, max_prob=0.82,
-    min_ev=3.0,           # EV mínimo real (% retorno hacia TP)
+    # Alta selectividad: de 300 mercados solo entran los mejores
+    min_prob=0.60, max_prob=0.82,
+    min_ev=3.5,           # solo movimientos con buen retorno esperado
     tp_offset=0.15,       # TP = entrada + 15pp
-    tp_max=0.92,          # TP máximo absoluto
-    sl_drop=0.07,         # SL 7pp por debajo de entrada
-    kelly_mult=0.12,      # reducido de 0.25
-    min_kelly=0.04,
-    max_pos=4,
+    tp_max=0.92,
+    sl_drop=0.05,         # SL mÃ¡s ajustado: cortar rÃ¡pido si falla
+    kelly_mult=0.30,      # posiciones mÃ¡s grandes para llegar al 30%
+    min_kelly=0.10,       # mÃ­nimo garantizado: 10% de caja por posiciÃ³n
+    max_pos=4,            # pocos movimientos simultÃ¡neos, pero de calidad
     min_liq=15000,
     min_vol=3000,
-    max_spread=0.04,      # filtro spread: YES+NO-1 ≤ 4%
+    max_spread=0.04,
     trail_be=0.05,
     trail_lock=0.10,
     trail_gap=0.04,
-    max_cycles_open=180,  # salida temporal si estancado
+    max_cycles_open=90,   # salida rÃ¡pida si se estanca
 )
 SAT = dict(
     label="SAT",
-    min_prob=0.58, max_prob=0.74,
+    # Muy selectivo: solo los mejores de alta liquidez
+    min_prob=0.60, max_prob=0.75,
     min_ev=4.0,
-    tp_offset=0.14,
-    tp_max=0.90,
-    sl_drop=0.07,
-    kelly_mult=0.14,      # reducido de 0.40
-    min_kelly=0.05,
-    max_pos=2,
+    tp_offset=0.15,
+    tp_max=0.91,
+    sl_drop=0.05,
+    kelly_mult=0.30,      # posiciÃ³n grande en los 2 slots SAT
+    min_kelly=0.10,
+    max_pos=2,            # solo 2 posiciones SAT, muy selectivas
     min_liq=20000,
-    min_vol=30000,
-    max_spread=0.03,
+    min_vol=20000,
+    max_spread=0.04,
     trail_be=0.04,
     trail_lock=0.09,
     trail_gap=0.04,
-    max_cycles_open=180,
+    max_cycles_open=90,
 )
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # ESTADO GLOBAL
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 _lock = threading.Lock()
 
 ST = dict(
@@ -87,18 +89,18 @@ ST = dict(
     wins=0, loss=0, be_count=0,
     ord_core=0, ord_sat=0,
     cycle=0,
-    status="Iniciando…",
+    status="Iniciandoâ¦",
     last_update=None,
 )
 
 # Aprendizaje adaptativo (fuera del lock, se actualiza con GIL)
-PRICE_HISTORY  = {}   # {slug: [p1,p2,...]} últimos 8 precios
-CAT_STATS      = {}   # {cat: {w,l,be}} win rate por categoría
-CONSEC_LOSSES  = 0    # pérdidas consecutivas → reduce Kelly
+PRICE_HISTORY  = {}   # {slug: [p1,p2,...]} Ãºltimos 8 precios
+CAT_STATS      = {}   # {cat: {w,l,be}} win rate por categorÃ­a
+CONSEC_LOSSES  = 0    # pÃ©rdidas consecutivas â reduce Kelly
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # UTILIDADES DE APRENDIZAJE
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 def get_category(slug, question):
     """Clasifica el mercado para aprendizaje adaptativo."""
     s = (slug + " " + question).lower()
@@ -120,7 +122,7 @@ def get_category(slug, question):
     return 'other'
 
 def cat_kelly_multiplier(category):
-    """Ajusta Kelly dinámicamente según rendimiento histórico de la categoría."""
+    """Ajusta Kelly dinÃ¡micamente segÃºn rendimiento histÃ³rico de la categorÃ­a."""
     if category not in CAT_STATS:
         return 1.0
     s   = CAT_STATS[category]
@@ -173,7 +175,7 @@ def keywords_from_q(q):
                if w.lower().strip('?.,!') not in stop and len(w) > 3)
 
 def is_correlated(q_new, existing_positions, threshold=2):
-    """True si el nuevo mercado comparte ≥threshold palabras clave con posiciones abiertas."""
+    """True si el nuevo mercado comparte â¥threshold palabras clave con posiciones abiertas."""
     kw_new = keywords_from_q(q_new)
     for p in existing_positions:
         kw_ex  = keywords_from_q(p["q"])
@@ -181,9 +183,9 @@ def is_correlated(q_new, existing_positions, threshold=2):
             return True
     return False
 
-# ──────────────────────────────────────────
-# LÓGICA DE SIMULACIÓN
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
+# LÃGICA DE SIMULACIÃN
+# ââââââââââââââââââââââââââââââââââââââââââ
 def portfolio_value():
     v = ST["cash_core"] + ST["cash_sat"]
     for p in ST["pos_core"]: v += p["size"] * p["cp"]
@@ -191,13 +193,13 @@ def portfolio_value():
     return round(v, 4)
 
 def kelly_size(prob, mult, cash, min_kelly):
-    """Kelly con ajuste dinámico por pérdidas consecutivas."""
+    """Kelly con ajuste dinÃ¡mico por pÃ©rdidas consecutivas."""
     global CONSEC_LOSSES
     edge = max(prob - 0.50, 0.04)
     f    = edge * mult * 2.5
     f    = max(f, min_kelly)
     f    = min(f, 0.22)                          # techo absoluto 22%
-    # Penalización por racha de pérdidas
+    # PenalizaciÃ³n por racha de pÃ©rdidas
     loss_pen = min(CONSEC_LOSSES * 0.12, 0.55)
     f = f * (1.0 - loss_pen)
     f = max(f, min_kelly * 0.4)
@@ -227,17 +229,17 @@ def check_close(p, current_cycle):
     cycles_open = current_cycle - p.get("entry_cycle", current_cycle)
     if cycles_open >= p["strat"].get("max_cycles_open", 200):
         gain = (p["cp"] - p["ep"]) / p["ep"]
-        if gain < 0.03:   # < 3% ganancia tras N ciclos → salir
+        if gain < 0.03:   # < 3% ganancia tras N ciclos â salir
             return "TIME"
     return None
 
 def eval_mkt(m, strat):
     """
-    Evalúa un mercado con criterios v2:
-    - EV real desde TP dinámico
+    EvalÃºa un mercado con criterios v2:
+    - EV real desde TP dinÃ¡mico
     - Filtro de spread (bid-ask)
-    - Filtro de momentum (no entrar en caída)
-    - Score ponderado con aprendizaje por categoría
+    - Filtro de momentum (no entrar en caÃ­da)
+    - Score ponderado con aprendizaje por categorÃ­a
     """
     try:
         prices = json.loads(m.get("outcomePrices", "[0,0]") or "[0,0]")
@@ -259,7 +261,7 @@ def eval_mkt(m, strat):
     if spread > strat["max_spread"]:
         return None
 
-    # TP y SL dinámicos
+    # TP y SL dinÃ¡micos
     tp = min(strat["tp_max"], yes_p + strat["tp_offset"])
     sl = max(0.08, yes_p - strat["sl_drop"])
 
@@ -269,25 +271,25 @@ def eval_mkt(m, strat):
         return None
 
     slug = m.get("slug") or m.get("id", "")
-    q    = m.get("question", "—")
+    q    = m.get("question", "â")
 
     # Filtro de momentum: no entrar en tendencia bajista
     mom = price_momentum(slug)
     if mom == -1:
         return None
 
-    # Score con aprendizaje por categoría
+    # Score con aprendizaje por categorÃ­a
     category  = get_category(slug, q)
     cat_mult  = cat_kelly_multiplier(category)
 
-    prob_qual  = 1.0 - abs(yes_p - 0.67) * 2.0   # óptimo en 0.67
+    prob_qual  = 1.0 - abs(yes_p - 0.67) * 2.0   # Ã³ptimo en 0.67
     liq_score  = min(liq  / 300000.0, 1.0)
     vol_score  = min(vol  / 2000000.0, 1.0)
     spread_q   = max(0.0, 1.0 - spread * 25.0)
     mom_bonus  = 0.08 if mom == 1 else 0.0
 
     base_score = (prob_qual * 0.35 + liq_score * 0.30 +
-                  vol_score * 0.20 +spread_q  * 0.15 + mom_bonus)
+                  vol_score * 0.20 + spread_q  * 0.15 + mom_bonus)
     score = base_score * max(cat_mult, 0.2)  # nunca anular completamente
 
     return dict(
@@ -300,9 +302,9 @@ def eval_mkt(m, strat):
         spread=round(spread, 4),
     )
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # CICLO PRINCIPAL
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 def run_cycle(mkts):
     global CONSEC_LOSSES
 
@@ -365,7 +367,7 @@ def run_cycle(mkts):
     sweep(ST["pos_core"], False)
     sweep(ST["pos_sat"],  True)
 
-    # Calcular señales
+    # Calcular seÃ±ales
     c_sigs, s_sigs = [], []
     for m in mkts:
         c = eval_mkt(m, CORE)
@@ -375,12 +377,16 @@ def run_cycle(mkts):
 
     c_sigs.sort(key=lambda x: -x["score"])
     s_sigs.sort(key=lambda x: -x["score"])
-    ST["sigs_core"] = c_sigs[:5]
-    ST["sigs_sat"]  = s_sigs[:5]
+
+    # Filtrar seÃ±ales de mercados ya abiertos (evita duplicados en panel)
+    open_slugs = {p["slug"] for p in ST["pos_core"] + ST["pos_sat"]}
+    ST["sigs_core"] = [s for s in c_sigs if s["slug"] not in open_slugs][:5]
+    ST["sigs_sat"]  = [s for s in s_sigs if s["slug"] not in open_slugs][:5]
 
     # Abrir posiciones CORE
     all_pos = ST["pos_core"] + ST["pos_sat"]
-    slug_set_c = {p["slug"] for p in ST["pos_core"]}
+    # slug_set incluye CORE + SAT para evitar misma apuesta en ambas estrategias
+    slug_set_c = {p["slug"] for p in ST["pos_core"] + ST["pos_sat"]}
     for s in c_sigs:
         if len(ST["pos_core"]) >= CORE["max_pos"]: break
         if ST["cash_core"] < 10:                  break
@@ -409,7 +415,8 @@ def run_cycle(mkts):
         all_pos.append(pos)
 
     # Abrir posiciones SAT
-    slug_set_s = {p["slug"] for p in ST["pos_sat"]}
+    # slug_set incluye CORE + SAT â impide misma apuesta en las dos estrategias
+    slug_set_s = {p["slug"] for p in ST["pos_core"] + ST["pos_sat"]}
     for s in s_sigs:
         if len(ST["pos_sat"]) >= SAT["max_pos"]: break
         if ST["cash_sat"] < 5:                   break
@@ -443,7 +450,7 @@ def run_cycle(mkts):
         ST["pf_hist"].pop(0)
 
 def micro_jitter():
-    """Simula pequeños movimientos de precio entre ciclos API."""
+    """Simula pequeÃ±os movimientos de precio entre ciclos API."""
     for arr in [ST["pos_core"], ST["pos_sat"]]:
         for p in arr:
             drift   = (p["ep"] - p["cp"]) * 0.015
@@ -452,9 +459,9 @@ def micro_jitter():
             p["cp"] = new_cp
             trail_update(p)
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # THREADS DE FONDO
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 def api_loop():
     """Ciclo principal: descarga mercados y ejecuta estrategia."""
     while True:
@@ -468,7 +475,7 @@ def api_loop():
             update_price_history(mkts)
             with _lock:
                 ST["cycle"]       += 1
-                ST["status"]       = f"OK — {len(mkts)} mercados"
+                ST["status"]       = f"OK â {len(mkts)} mercados"
                 ST["last_update"]  = datetime.now(timezone.utc).isoformat()
                 run_cycle(mkts)
         except Exception as e:
@@ -484,9 +491,9 @@ def jitter_loop():
             micro_jitter()
         time.sleep(JIT_INTERVAL)
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # RUTAS WEB
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 @app.route("/api/state")
 def api_state():
     with _lock:
@@ -537,9 +544,9 @@ def api_state():
 def dashboard():
     return render_template_string(DASHBOARD_HTML)
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # DASHBOARD HTML
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -593,23 +600,23 @@ body { background: #0a0e1a; color: #e0e6f0; font-family: 'Segoe UI', monospace; 
 <body>
 <div class="header">
   <div>
-    <div class="brand"><span class="poly">POLY</span><span class="market">MARKET</span><small>Barbell Simulator v2 — 24/7</small></div>
-    <div style="font-size:10px;color:#7a8fa8;margin-top:2px">TP dinámico +15pp | SL 7% | Momentum + Anti-correlación | Aprendizaje adaptativo | <span class="green">● Live</span></div>
+    <div class="brand"><span class="poly">POLY</span><span class="market">MARKET</span><small>Barbell Simulator v2 â 24/7</small></div>
+    <div style="font-size:10px;color:#7a8fa8;margin-top:2px">TP dinÃ¡mico +15pp | SL 7% | Momentum + Anti-correlaciÃ³n | Aprendizaje adaptativo | <span class="green">â Live</span></div>
   </div>
   <div class="stats" id="hstats">
-    <div class="stat"><div class="val" id="hpf">€1000.00</div><div class="lbl">PORTFOLIO</div></div>
-    <div class="stat"><div class="val" id="hpl">+€0.00</div><div class="lbl">P&L</div></div>
+    <div class="stat"><div class="val" id="hpf">â¬1000.00</div><div class="lbl">PORTFOLIO</div></div>
+    <div class="stat"><div class="val" id="hpl">+â¬0.00</div><div class="lbl">P&L</div></div>
     <div class="stat"><div class="val" id="hpct">+0.00%</div><div class="lbl">RETORNO</div></div>
-    <div class="stat"><div class="val orange" id="hinv">€0.00</div><div class="lbl">INVERTIDO</div></div>
+    <div class="stat"><div class="val orange" id="hinv">â¬0.00</div><div class="lbl">INVERTIDO</div></div>
     <div class="stat"><div class="val" id="hcyc">0</div><div class="lbl">CICLO</div></div>
   </div>
 </div>
 <div class="statusbar" id="statusbar">
   <span><span class="dot" id="sdot" style="background:#ffd700"></span><span id="stxt">Cargando...</span></span>
-  <span style="color:#7a8fa8">Win Rate: <b id="swr" style="color:#7a8fa8">—</b></span>
+  <span style="color:#7a8fa8">Win Rate: <b id="swr" style="color:#7a8fa8">â</b></span>
   <span style="color:#7a8fa8">G:<b class="green" id="sw">0</b> P:<b class="red" id="sl2">0</b> BE:<b class="gold" id="sbe">0</b></span>
-  <span style="color:#7a8fa8">Racha pérdidas: <b id="scl" style="color:#ff9900">0</b></span>
-  <span style="margin-left:auto;color:#7a8fa8">Actualizado: <b id="sup" style="color:#00d4ff">—</b></span>
+  <span style="color:#7a8fa8">Racha pÃ©rdidas: <b id="scl" style="color:#ff9900">0</b></span>
+  <span style="margin-left:auto;color:#7a8fa8">Actualizado: <b id="sup" style="color:#00d4ff">â</b></span>
 </div>
 <div class="body">
   <div class="col">
@@ -618,45 +625,45 @@ body { background: #0a0e1a; color: #e0e6f0; font-family: 'Segoe UI', monospace; 
       <div class="panel-title">Curva Portfolio</div>
       <div class="spark" id="spark"></div>
       <div style="display:flex;justify-content:space-between;font-size:10px;color:#7a8fa8;margin-top:6px">
-        <span>Inicio: <b style="color:#fff">€1000</b></span><span id="pfnow">—</span><span id="pfpct">—</span>
+        <span>Inicio: <b style="color:#fff">â¬1000</b></span><span id="pfnow">â</span><span id="pfpct">â</span>
       </div>
     </div>
-    <div class="panel"><div class="panel-title">🧠 Aprendizaje por Categoría</div><div id="cat-panel" class="cat-grid"></div></div>
-    <div class="panel" style="flex:1"><div class="panel-title">📈 Historial de Operaciones</div><div id="hist" style="max-height:240px;overflow-y:auto"></div></div>
+    <div class="panel"><div class="panel-title">ð§  Aprendizaje por CategorÃ­a</div><div id="cat-panel" class="cat-grid"></div></div>
+    <div class="panel" style="flex:1"><div class="panel-title">ð Historial de Operaciones</div><div id="hist" style="max-height:240px;overflow-y:auto"></div></div>
   </div>
   <div class="col">
-    <div class="panel"><div class="panel-title" style="color:#00d4ff">💼 Posiciones CORE</div><div id="pos-core" style="max-height:260px;overflow-y:auto"></div></div>
-    <div class="panel sat-border"><div class="panel-title" style="color:#ffd700">⚡ Posiciones SATÉLITE</div><div id="pos-sat" style="max-height:180px;overflow-y:auto"></div></div>
+    <div class="panel"><div class="panel-title" style="color:#00d4ff">ð¼ Posiciones CORE</div><div id="pos-core" style="max-height:260px;overflow-y:auto"></div></div>
+    <div class="panel sat-border"><div class="panel-title" style="color:#ffd700">â¡ Posiciones SATÃLITE</div><div id="pos-sat" style="max-height:180px;overflow-y:auto"></div></div>
     <div class="panel" style="flex:1">
-      <div class="panel-title">🔎 Top Señales</div>
-      <div style="color:#00d4ff;font-size:10px;font-weight:700;margin-bottom:4px">CORE (EV≥3%)</div>
+      <div class="panel-title">ð Top SeÃ±ales</div>
+      <div style="color:#00d4ff;font-size:10px;font-weight:700;margin-bottom:4px">CORE (EVâ¥3%)</div>
       <div id="sigs-core"></div>
-      <div style="color:#ffd700;font-size:10px;font-weight:700;margin:10px 0 4px">SATÉLITE (EV≥4%)</div>
+      <div style="color:#ffd700;font-size:10px;font-weight:700;margin:10px 0 4px">SATÃLITE (EVâ¥4%)</div>
       <div id="sigs-sat"></div>
     </div>
   </div>
 </div>
 <script>
 function clr(v){ return v>0?'#00e676':v<0?'#ff4444':'#ffd700'; }
-function fp(v){ return (v>=0?'+':'')+'€'+v.toFixed(2); }
+function fp(v){ return (v>=0?'+':'')+'â¬'+v.toFixed(2); }
 function fpc(v){ return (v>=0?'+':'')+v.toFixed(2)+'%'; }
 function phLabel(ph){ return ph===0?'Init':ph===1?'BE':'Trail'; }
 function phDot(ph){ var c=ph===0?'#ffd700':ph===1?'#00aaff':'#00e676'; return '<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:'+c+';margin-right:3px;vertical-align:middle"></span>'; }
-function momIcon(m){ return m===1?'↑':m===-1?'↓':'→'; }
+function momIcon(m){ return m===1?'â':m===-1?'â':'â'; }
 var CAT_COLORS = {sports:'#ff7043',crypto:'#ab47bc',politics:'#42a5f5',geopolitics:'#ef5350',macro:'#ffca28',other:'#78909c'};
 function render(d){
   var plC = clr(d.pl);
   document.getElementById('hpf').style.color=plC;
-  document.getElementById('hpf').textContent='€'+d.portfolio.toFixed(2);
+  document.getElementById('hpf').textContent='â¬'+d.portfolio.toFixed(2);
   document.getElementById('hpl').style.color=plC;
   document.getElementById('hpl').textContent=fp(d.pl);
   document.getElementById('hpct').style.color=plC;
   document.getElementById('hpct').textContent=fpc(d.pl_pct);
-  document.getElementById('hinv').textContent='€'+d.total_invested.toFixed(2);
+  document.getElementById('hinv').textContent='â¬'+d.total_invested.toFixed(2);
   document.getElementById('hcyc').textContent=d.cycle;
   document.getElementById('sdot').style.background=d.status.startsWith('OK')?'#00e676':'#ffd700';
   document.getElementById('stxt').textContent=d.status;
-  var wr=d.win_rate!==null?d.win_rate+'%':'—';
+  var wr=d.win_rate!==null?d.win_rate+'%':'â';
   var wrEl=document.getElementById('swr');
   wrEl.textContent=wr; wrEl.style.color=d.win_rate===null?'#7a8fa8':d.win_rate>=50?'#00e676':'#ff4444';
   document.getElementById('sw').textContent=d.wins;
@@ -671,16 +678,16 @@ function render(d){
   var satVal=d.cash_sat+d.pos_sat.reduce(function(a,p){return a+p.value_now;},0);
   document.getElementById('barbell').innerHTML=
     '<div class="barbell-core">'+
-    '<div style="color:#00d4ff;font-size:10px;font-weight:700;margin-bottom:4px">CORE — 80%</div>'+
-    '<div style="font-size:20px;font-weight:700;color:#fff">€'+coreVal.toFixed(2)+'</div>'+
-    '<div style="font-size:10px;color:#7a8fa8;margin-top:2px">EV≥3% | Kelly ~12% | SL 7%</div>'+
-    '<div style="font-size:10px;color:#7a8fa8">Pos: <b style="color:#fff">'+d.pos_core.length+'/4</b> | Cash: <b style="color:#fff">€'+d.cash_core.toFixed(2)+'</b></div>'+
+    '<div style="color:#00d4ff;font-size:10px;font-weight:700;margin-bottom:4px">CORE â 80%</div>'+
+    '<div style="font-size:20px;font-weight:700;color:#fff">â¬'+coreVal.toFixed(2)+'</div>'+
+    '<div style="font-size:10px;color:#7a8fa8;margin-top:2px">EVâ¥3% | Kelly ~12% | SL 7%</div>'+
+    '<div style="font-size:10px;color:#7a8fa8">Pos: <b style="color:#fff">'+d.pos_core.length+'/4</b> | Cash: <b style="color:#fff">â¬'+d.cash_core.toFixed(2)+'</b></div>'+
     '</div>'+
     '<div class="barbell-sat">'+
-    '<div style="color:#ffd700;font-size:10px;font-weight:700;margin-bottom:4px">SAT — 20%</div>'+
-    '<div style="font-size:20px;font-weight:700;color:#fff">€'+satVal.toFixed(2)+'</div>'+
-    '<div style="font-size:10px;color:#7a8fa8;margin-top:2px">EV≥4% | Kelly ~14%</div>'+
-    '<div style="font-size:10px;color:#7a8fa8">Pos: <b style="color:#fff">'+d.pos_sat.length+'/2</b> | Cash: <b style="color:#fff">€'+d.cash_sat.toFixed(2)+'</b></div>'+
+    '<div style="color:#ffd700;font-size:10px;font-weight:700;margin-bottom:4px">SAT â 20%</div>'+
+    '<div style="font-size:20px;font-weight:700;color:#fff">â¬'+satVal.toFixed(2)+'</div>'+
+    '<div style="font-size:10px;color:#7a8fa8;margin-top:2px">EVâ¥4% | Kelly ~14%</div>'+
+    '<div style="font-size:10px;color:#7a8fa8">Pos: <b style="color:#fff">'+d.pos_sat.length+'/2</b> | Cash: <b style="color:#fff">â¬'+d.cash_sat.toFixed(2)+'</b></div>'+
     '</div>';
   // Sparkline
   var hist=d.pf_hist,mn=Math.min.apply(null,hist),mx=Math.max.apply(null,hist),rng=mx-mn||1;
@@ -688,9 +695,9 @@ function render(d){
     var h=Math.max(3,Math.round(((v-mn)/rng)*48));
     return '<div class="spark-bar" style="height:'+h+'px;background:'+(v>=1000?'#00e676':'#ff4444')+'"></div>';
   }).join('');
-  document.getElementById('pfnow').innerHTML='Ahora: <b style="color:'+(d.pl>=0?'#00e676':'#ff4444')+'">€'+d.portfolio.toFixed(2)+'</b>';
+  document.getElementById('pfnow').innerHTML='Ahora: <b style="color:'+(d.pl>=0?'#00e676':'#ff4444')+'">â¬'+d.portfolio.toFixed(2)+'</b>';
   document.getElementById('pfpct').innerHTML='<b style="color:'+(d.pl>=0?'#00e676':'#ff4444')+'">'+fpc(d.pl_pct)+'</b>';
-  // Categorías aprendizaje
+  // CategorÃ­as aprendizaje
   var cats=d.cat_stats||{};
   var catHtml=Object.keys(cats).map(function(cat){
     var s=cats[cat]; var tot=s.w+s.l+s.be||1; var wr=Math.round(s.w/tot*100);
@@ -698,7 +705,7 @@ function render(d){
     return '<div class="cat-chip" style="color:'+col+';border-color:'+col+'22;background:'+col+'11">'+
       cat+' '+wr+'% ('+s.w+'W/'+s.l+'L)</div>';
   }).join('');
-  document.getElementById('cat-panel').innerHTML=catHtml||'<div class="empty">Sin datos aún</div>';
+  document.getElementById('cat-panel').innerHTML=catHtml||'<div class="empty">Sin datos aÃºn</div>';
   // Posiciones
   function renderPos(arr,isCore){
     if(!arr.length) return '<div class="empty">Sin posiciones abiertas</div>';
@@ -712,14 +719,14 @@ function render(d){
         '<span style="color:'+lc+';font-size:10px;font-weight:700">'+lt+'</span>'+
         '<div style="display:flex;align-items:center;gap:8px">'+
         '<span style="color:'+catC+';font-size:9px;background:'+catC+'11;border:1px solid '+catC+'33;padding:1px 5px;border-radius:8px">'+p.category+'</span>'+
-        '<span style="color:'+clr(p.pl_eur)+';font-weight:700;font-size:13px">'+(p.pl_eur>=0?'+':'')+'€'+p.pl_eur.toFixed(2)+'</span>'+
+        '<span style="color:'+clr(p.pl_eur)+';font-weight:700;font-size:13px">'+(p.pl_eur>=0?'+':'')+'â¬'+p.pl_eur.toFixed(2)+'</span>'+
         '<span style="color:'+clr(p.gain_pct)+';font-size:11px;font-weight:700">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</span>'+
         '</div></div>'+
         '<div class="pos-name">'+p.q+'</div>'+
         '<div class="pos-amounts">'+
-        '<div class="amount-box"><div class="albl">Invertido</div><div class="aval" style="color:#fff">€'+p.invested.toFixed(2)+'</div></div>'+
-        '<div class="amount-box"><div class="albl">Valor actual</div><div class="aval" style="color:'+clr(p.gain_pct)+'">€'+p.value_now.toFixed(2)+'</div></div>'+
-        '<div class="amount-box"><div class="albl">P&L €</div><div class="aval" style="color:'+clr(p.pl_eur)+'">'+(p.pl_eur>=0?'+':'')+'€'+p.pl_eur.toFixed(2)+'</div></div>'+
+        '<div class="amount-box"><div class="albl">Invertido</div><div class="aval" style="color:#fff">â¬'+p.invested.toFixed(2)+'</div></div>'+
+        '<div class="amount-box"><div class="albl">Valor actual</div><div class="aval" style="color:'+clr(p.gain_pct)+'">â¬'+p.value_now.toFixed(2)+'</div></div>'+
+        '<div class="amount-box"><div class="albl">P&L â¬</div><div class="aval" style="color:'+clr(p.pl_eur)+'">'+(p.pl_eur>=0?'+':'')+'â¬'+p.pl_eur.toFixed(2)+'</div></div>'+
         '</div>'+
         '<div class="pl-bar"><div class="pl-bar-fill" style="width:'+plBar+'%;background:'+plGrad+'"></div></div>'+
         '<div class="pos-tech">'+
@@ -728,7 +735,7 @@ function render(d){
         '<span>TP: <b style="color:#00e676">'+p.tp+'%</b></span>'+
         '<span>SL: <b style="color:#ff4444">'+p.sl+'%</b></span>'+
         '<span>'+phDot(p.phase)+phLabel(p.phase)+'</span>'+
-        '<span style="color:#7a8fa8">⏱'+p.cycles_open+'c</span>'+
+        '<span style="color:#7a8fa8">â±'+p.cycles_open+'c</span>'+
         '</div></div>';
     }).join('');
   }
@@ -739,21 +746,21 @@ function render(d){
   else document.getElementById('hist').innerHTML=d.hist.map(function(h){
     var lc=h.is_sat?'#ffd700':'#00d4ff';
     var catC=CAT_COLORS[h.category]||'#78909c';
-    var inv=h.invested?' (€'+h.invested.toFixed(2)+')':'';
+    var inv=h.invested?' (â¬'+h.invested.toFixed(2)+')':'';
     return '<div class="hist-row" style="background:'+(h.is_sat?'#3a2a00':'#1a2d4a')+'22">'+
       '<span style="color:'+lc+';min-width:50px">'+h.rsn+'</span>'+
       '<span style="color:'+catC+';font-size:9px;min-width:60px">'+h.category+'</span>'+
       '<span style="flex:1;color:#aaa;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">'+h.q+'</span>'+
       '<span style="color:#7a8fa8;min-width:52px;text-align:right">'+inv+'</span>'+
-      '<span style="color:'+clr(h.pnl)+';font-weight:700;min-width:60px;text-align:right">'+(h.pnl>=0?'+':'')+'€'+h.pnl.toFixed(2)+'</span>'+
+      '<span style="color:'+clr(h.pnl)+';font-weight:700;min-width:60px;text-align:right">'+(h.pnl>=0?'+':'')+'â¬'+h.pnl.toFixed(2)+'</span>'+
       '</div>';
   }).join('');
-  // Señales
+  // SeÃ±ales
   function renderSigs(sigs){
-    if(!sigs.length) return '<div class="empty">Sin señales</div>';
+    if(!sigs.length) return '<div class="empty">Sin seÃ±ales</div>';
     return sigs.slice(0,4).map(function(s,i){
       var catC=CAT_COLORS[s.category]||'#78909c';
-      var mom=s.momentum===1?'<span style="color:#00e676">↑</span>':s.momentum===-1?'<span style="color:#ff4444">↓</span>':'<span style="color:#7a8fa8">→</span>';
+      var mom=s.momentum===1?'<span style="color:#00e676">â</span>':s.momentum===-1?'<span style="color:#ff4444">â</span>':'<span style="color:#7a8fa8">â</span>';
       return '<div class="sig-row">'+
         '<span style="color:#7a8fa8;min-width:14px">'+(i+1)+'</span>'+
         '<span style="color:'+catC+';min-width:60px;font-size:9px">'+s.category+'</span>'+
@@ -775,9 +782,9 @@ setInterval(refresh, 6000);
 </body>
 </html>"""
 
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # ARRANQUE
-# ──────────────────────────────────────────
+# ââââââââââââââââââââââââââââââââââââââââââ
 # Iniciar threads de fondo al importar (gunicorn no ejecuta __main__)
 threading.Thread(target=api_loop,    daemon=True).start()
 threading.Thread(target=jitter_loop, daemon=True).start()
