@@ -542,7 +542,8 @@ def api_state():
 
 @app.route("/")
 def dashboard():
-    return render_template_string(DASHBOARD_HTML)
+    html = DASHBOARD_HTML.encode('latin-1').decode('utf-8')
+    return render_template_string(html)
 
 # ââââââââââââââââââââââââââââââââââââââââââ
 # DASHBOARD HTML
